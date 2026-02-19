@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+google-genai
+langchain
+langchain-google-genai
+pytest
+sqlalchemy
+sqlmodel
+pyjwt
+passlib
+selenium

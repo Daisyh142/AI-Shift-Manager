@@ -1,0 +1,23 @@
+# Python
+.venv
+.env
+__pycache__/
+*.pyc
+*.pyo
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env.local
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.cursor/
