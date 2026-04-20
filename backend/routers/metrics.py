@@ -18,13 +18,6 @@ def get_schedule_metrics(
     schedule_run_id: int,
     session: Session = Depends(get_session),
 ) -> ScheduleMetricsResponse:
-    """
-    Deterministic metrics derived from SQL (no LLM involvement).
-
-    Connection to the rest of the app:
-    - Uses `Shift.required_staff` + assignments to compute coverage.
-    - Uses stored fairness_json/violations_json from ScheduleRun.
-    """
     run = session.get(ScheduleRun, schedule_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="schedule_run_not_found")

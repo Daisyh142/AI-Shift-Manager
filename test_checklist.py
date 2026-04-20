@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import time
+import re
 from datetime import datetime, timedelta
 
 from selenium import webdriver
@@ -12,10 +14,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-BASE_URL = "http://127.0.0.1:5173"
+BASE_URL = os.getenv("UI_BASE_URL", "http://localhost:5173")
 
 
-class TestResults:
+class ChecklistResults:
     def __init__(self) -> None:
         self.results: list[dict[str, str]] = []
 
@@ -52,8 +54,16 @@ def wait_text(wait: WebDriverWait, text: str) -> None:
     wait.until(EC.presence_of_element_located((By.XPATH, f"//*[contains(text(), '{text}')]")))
 
 
+def current_run_id(driver: webdriver.Chrome) -> int | None:
+    for element in driver.find_elements(By.XPATH, "//*[contains(text(), 'Run #')]"):
+        match = re.search(r"Run\\s*#(\\d+)", element.text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def run_ui_checklist() -> None:
-    results = TestResults()
+    results = ChecklistResults()
     driver = setup_driver()
     wait = WebDriverWait(driver, 12)
 
@@ -69,31 +79,53 @@ def run_ui_checklist() -> None:
         demo_btn = driver.find_element(By.XPATH, "//*[contains(text(), 'Try Demo Data')]")
         demo_btn.click()
         wait.until(EC.url_contains("/dashboard"))
-        wait_text(wait, "Schedule Actions")
+        wait_text(wait, "Operations Command Center")
         results.add("2", "PASS", f"Demo login succeeded, URL={driver.current_url}")
 
         # 3) Generate schedule
-        driver.find_element(By.XPATH, "//*[contains(text(), 'Generate Schedule')]").click()
-        wait_text(wait, "Current schedule run ID")
-        results.add("3", "PASS", "Generate schedule action completed and run ID shown")
+        driver.find_element(By.XPATH, "//button[contains(., 'Generate')]").click()
+        wait_text(wait, "Week 1")
+        wait_text(wait, "Week 2")
+        wait.until(lambda d: current_run_id(d) is not None)
+        generated_run_id = current_run_id(driver)
+        results.add("3", "PASS", f"Generate completed and 2-week view is visible (run #{generated_run_id})")
 
-        # 4) Publish schedule
+        # 4) Normal chat question should not trigger regeneration
+        chatbox = driver.find_element(By.XPATH, "//textarea[contains(@placeholder, 'Ask about fairness')]")
+        chatbox.send_keys("How fair is this schedule right now?")
+        driver.find_element(By.XPATH, "//button[contains(., 'Send')]").click()
+        time.sleep(1)
+        after_normal_chat_run_id = current_run_id(driver)
+        if after_normal_chat_run_id != generated_run_id:
+            raise AssertionError("Normal chat unexpectedly changed run id")
+        results.add("4", "PASS", "Normal chat message did not regenerate schedule")
+
+        # 5) Regenerate intent from chat should create a new run
+        chatbox = driver.find_element(By.XPATH, "//textarea[contains(@placeholder, 'Ask about fairness')]")
+        chatbox.send_keys("regenerate: rebalance hours for fairness")
+        driver.find_element(By.XPATH, "//button[contains(., 'Send')]").click()
+        wait.until(lambda d: current_run_id(d) is not None and current_run_id(d) != generated_run_id)
+        regenerated_run_id = current_run_id(driver)
+        wait_text(wait, "I started regeneration using your reason")
+        results.add("5", "PASS", f"Chat regenerate intent created new run #{regenerated_run_id}")
+
+        # 6) Publish schedule
         driver.find_element(By.XPATH, "//*[contains(text(), 'Publish')]").click()
         time.sleep(1)
-        results.add("4", "PASS", "Publish action triggered without visible crash")
+        results.add("6", "PASS", "Publish action triggered without visible crash")
 
-        # 5) Owner Requests page
+        # 7) Owner Requests page
         driver.find_element(By.XPATH, "//*[contains(text(), 'Requests')]").click()
         wait_text(wait, "All Requests")
-        results.add("5", "PASS", "Owner requests page loaded")
+        results.add("7", "PASS", "Owner requests page loaded")
 
-        # 6) Logout
+        # 8) Logout
         driver.find_element(By.XPATH, "//*[contains(text(), 'Log out')]").click()
         wait.until(EC.url_to_be(BASE_URL + "/"))
         wait_text(wait, "Sign in")
-        results.add("6", "PASS", "Logout returned to login page")
+        results.add("8", "PASS", "Logout returned to login page")
 
-        # 7) Employee login
+        # 9) Employee login
         email = driver.find_element(By.CSS_SELECTOR, "input[type='email']")
         password = driver.find_element(By.CSS_SELECTOR, "input[type='password']")
         email.clear()
@@ -103,20 +135,22 @@ def run_ui_checklist() -> None:
         driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
         wait.until(EC.url_contains("/dashboard"))
         wait_text(wait, "My Schedule")
-        results.add("7", "PASS", "Employee login succeeded")
+        results.add("9", "PASS", "Employee login succeeded")
 
-        # 8) Employee stats visible
-        wait_text(wait, "Weekly Required Hours")
+        # 10) Employee stats visible
+        wait_text(wait, "Required This Week")
         wait_text(wait, "PTO Balance")
-        results.add("8", "PASS", "Employee dashboard stats are visible")
+        results.add("10", "PASS", "Employee dashboard stats are visible")
 
-        # 9) Team schedule page
+        # 11) Team schedule page
         driver.find_element(By.XPATH, "//*[contains(text(), 'Team Schedule')]").click()
         wait.until(EC.url_contains("/team-schedule"))
         wait_text(wait, "Team Schedule")
-        results.add("9", "PASS", "Team schedule page loaded")
+        wait_text(wait, "Week 1")
+        wait_text(wait, "Week 2")
+        results.add("11", "PASS", "Team schedule page loaded with 2-week sections")
 
-        # 10) Submit request from My Requests
+        # 12) Submit request from My Requests
         driver.find_element(By.XPATH, "//*[contains(text(), 'My Requests')]").click()
         wait.until(EC.url_contains("/my-requests"))
         wait_text(wait, "Submit Time Off Request")
@@ -126,7 +160,7 @@ def run_ui_checklist() -> None:
         date_input.send_keys(future_date)
         driver.find_element(By.XPATH, "//*[contains(text(), 'Submit Request')]").click()
         time.sleep(1)
-        results.add("10", "PASS", f"Employee submitted request for date={future_date}")
+        results.add("12", "PASS", f"Employee submitted request for date={future_date}")
 
     except TimeoutException as exc:
         results.add("fatal", "FAIL", "UI timeout while waiting for expected element", str(exc))

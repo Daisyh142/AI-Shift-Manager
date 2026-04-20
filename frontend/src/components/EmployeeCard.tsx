@@ -50,7 +50,6 @@ export function EmployeeCard({ employee, fairnessPercent, onClick }: EmployeeCar
   )
 }
 
-// Normalizes a raw role string to a readable display label.
 function formatRoleLabel(raw: string) {
   const normalized = raw.toLowerCase().replace(/[-_]/g, ' ')
   if (normalized === 'shift lead' || normalized === 'shiftlead') return 'Shift Lead'
@@ -60,7 +59,6 @@ function formatRoleLabel(raw: string) {
   return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-// Shows the employee's fairness score ring, or an N/A badge if no schedule has been generated.
 function EmployeeFairness({ fairnessPercent }: { fairnessPercent: number | null }) {
   if (fairnessPercent === null) {
     return <span className="rounded-lg bg-muted px-3 py-2 text-xs font-semibold text-muted-foreground">N/A</span>

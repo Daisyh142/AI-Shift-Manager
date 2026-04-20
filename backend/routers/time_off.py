@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 import os
-from datetime import date as Date, datetime, timedelta
+from datetime import date as Date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -19,17 +20,11 @@ DEFAULT_MIN_AVAILABLE_RATIO = 0.75  # 75% of employees must remain available
 
 
 def _min_available_ratio() -> float:
-    """
-    Hard constraint:
-    - ensure at least X% of employees remain available (i.e., NOT approved off) on a date.
-
-    Why env var:
-    - Different companies can set this threshold without changing code.
-    """
     raw = os.getenv("TIME_OFF_MIN_AVAILABLE_RATIO", str(DEFAULT_MIN_AVAILABLE_RATIO))
     try:
         value = float(raw)
     except ValueError:
+        print(f"[time_off] Invalid TIME_OFF_MIN_AVAILABLE_RATIO={raw!r}; using default {DEFAULT_MIN_AVAILABLE_RATIO}.")
         value = DEFAULT_MIN_AVAILABLE_RATIO
     return max(0.0, min(1.0, value))
 
@@ -58,19 +53,6 @@ def create_time_off_request(
     current_user = Depends(require_employee_or_owner),
     session: Session = Depends(get_session),
 ) -> TimeOffRequestResponse:
-    """
-    Employee submits PTO or Request Off.
-
-    Hard constraint enforced here:
-    - Must be submitted at least 14 days in advance.
-
-    PTO rules enforced here:
-    - PTO requires sufficient `employee.pto_balance_hours`.
-    - If insufficient, user should submit `request_off` instead.
-
-    Connection to scheduling:
-    - Only APPROVED requests are treated as unavailability when generating schedules.
-    """
     if current_user.role == "employee" and current_user.employee_id != request.employee_id:
         raise HTTPException(
             status_code=403,
@@ -90,6 +72,19 @@ def create_time_off_request(
             raise HTTPException(status_code=400, detail="pto_hours_required")
         if employee.pto_balance_hours < request.hours:
             raise HTTPException(status_code=400, detail="insufficient_pto_use_request_off")
+
+    existing = session.exec(
+        select(TimeOffRequest).where(
+            TimeOffRequest.employee_id == request.employee_id,
+            TimeOffRequest.date == request.date,
+            TimeOffRequest.kind == request.kind.value,
+            TimeOffRequest.status.in_(
+                [TimeOffStatus.PENDING.value, TimeOffStatus.APPROVED.value]
+            ),
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="duplicate_time_off_request_exists")
 
     row = TimeOffRequest(
         employee_id=request.employee_id,
@@ -122,12 +117,6 @@ def approve_time_off(
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> TimeOffRequestResponse:
-    """
-    Owner approves a request.
-
-    If approving PTO:
-    - Deduct hours from the employee PTO balance (hard accounting rule).
-    """
     row = session.get(TimeOffRequest, request_id)
     if not row:
         raise HTTPException(status_code=404, detail="request_not_found")
@@ -135,12 +124,13 @@ def approve_time_off(
     if row.status == TimeOffStatus.APPROVED.value:
         return _as_response(row)
 
+    if row.date < Date.today():
+        raise HTTPException(status_code=400, detail="cannot_approve_past_time_off_request")
+
     employee = session.get(Employee, row.employee_id)
     if not employee:
         raise HTTPException(status_code=404, detail="employee_not_found")
 
-    # Hard constraint: keep at least X% of employees available on this date.
-    # This prevents large clusters of people being off at the same time.
     employees_in_category = session.exec(
         select(Employee).where(Employee.category == employee.category)
     ).all()
@@ -150,7 +140,6 @@ def approve_time_off(
         min_available_count = int(math.ceil(total_employees * min_available_ratio))
         max_time_off_count = max(0, total_employees - min_available_count)
 
-        # Get all requests on this date that are either pending or approved.
         employee_ids_in_category = {e.id for e in employees_in_category}
         requests_for_date = session.exec(
             select(TimeOffRequest).where(
@@ -164,13 +153,9 @@ def approve_time_off(
         requests_for_date = [r for r in requests_for_date if r.employee_id in employee_ids_in_category]
         employee_by_id = {e.id: e for e in employees_in_category}
 
-        # "AI decides" placeholder logic:
-        # - Higher-priority roles get considered first (manager > shift_lead > full_time > part_time)
-        # - Ties break by submitted_at (first-come within the same priority)
         def _req_sort_key(r: TimeOffRequest):
             e = employee_by_id.get(r.employee_id)
             if not e:
-                # Unknown employee is lowest priority
                 return (0, r.submitted_at)
             return (-_employee_priority(e), r.submitted_at)
 
@@ -184,13 +169,18 @@ def approve_time_off(
             )
 
     if row.kind == TimeOffKind.PTO.value:
-        if employee.pto_balance_hours < row.hours:
+        stmt = (
+            update(Employee)
+            .where(Employee.id == employee.id, Employee.pto_balance_hours >= row.hours)
+            .values(pto_balance_hours=Employee.pto_balance_hours - row.hours)
+        )
+        result = session.exec(stmt)
+        if (result.rowcount or 0) == 0:
             raise HTTPException(status_code=400, detail="cannot_approve_pto_insufficient_balance")
-        employee.pto_balance_hours -= row.hours
-        session.add(employee)
+        session.flush()
 
     row.status = TimeOffStatus.APPROVED.value
-    row.decided_at = datetime.utcnow()
+    row.decided_at = datetime.now(timezone.utc)
     session.add(row)
     session.commit()
     session.refresh(row)
@@ -203,13 +193,12 @@ def deny_time_off(
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> TimeOffRequestResponse:
-    """Owner denies a request. Denied requests are ignored by scheduling."""
     row = session.get(TimeOffRequest, request_id)
     if not row:
         raise HTTPException(status_code=404, detail="request_not_found")
 
     row.status = TimeOffStatus.DENIED.value
-    row.decided_at = datetime.utcnow()
+    row.decided_at = datetime.now(timezone.utc)
     session.add(row)
     session.commit()
     session.refresh(row)

@@ -19,7 +19,6 @@ def _as_bool(value: str | None, default: bool) -> bool:
 
 
 def get_settings() -> Settings:
-    # Support both names so local env files from different tutorials work.
     key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     return Settings(
         gemini_api_key=key,

@@ -1,10 +1,3 @@
-"""
-Authentication router: register, login, and get-current-user.
-
-Uses JWT tokens stored client-side (localStorage or Authorization header).
-Passwords are hashed with passlib using PBKDF2-SHA256.
-"""
-
 from __future__ import annotations
 
 import os
@@ -26,11 +19,7 @@ from ..schemas import (
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ── Password hashing ─────────────────────────────────────────────────────────
-
 pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-
-# ── JWT helpers ───────────────────────────────────────────────────────────────
 
 SECRET_KEY = os.getenv("JWT_SECRET", "dev-secret-change-me-in-production")
 ALGORITHM = "HS256"
@@ -60,15 +49,11 @@ def _create_token(user_id: int) -> str:
 
 
 def _decode_token(token: str) -> int:
-    """Return user_id from a valid token, or raise 401."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return int(payload["sub"])
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, KeyError, ValueError):
         raise _unauthorized("Invalid or expired token")
-
-
-# ── Dependency: extract current user from Authorization header ────────────────
 
 
 def get_current_user_from_header(
@@ -96,8 +81,6 @@ def require_employee_or_owner(current_user: User = Depends(get_current_user_from
         raise _forbidden("Authenticated employee or owner role is required")
     return current_user
 
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=TokenResponse)
 def register(body: RegisterRequest, session: Session = Depends(get_session)):

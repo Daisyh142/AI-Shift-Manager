@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Tuple
 
-from .schemas import Assignment, Availability, Employee, PTO, Role, Shift
+from .schemas import Assignment, Availability, Employee, EmploymentType, PTO, Role, Shift
 
 
 def _shift_minutes(shift: Shift) -> Tuple[int, int]:
@@ -18,6 +18,38 @@ def _shift_hours(shift: Shift) -> float:
     start_dt = datetime.combine(shift.date, shift.start_time)
     end_dt = datetime.combine(shift.date, shift.end_time)
     return max(0.0, (end_dt - start_dt).total_seconds() / 3600)
+
+
+def _period_hour_multiplier(shifts: List[Shift]) -> float:
+    if not shifts:
+        return 1.0
+    days = (max(s.date for s in shifts) - min(s.date for s in shifts)).days + 1
+    return max(1.0, days / 7.0)
+
+
+def _week_start_iso(shift_date: date) -> str:
+    return (shift_date - timedelta(days=shift_date.weekday())).isoformat()
+
+
+def _max_days_decision(
+    *,
+    employee_id: str,
+    shift: Shift,
+    days_worked_by_employee_week: Dict[Tuple[str, str], set[str]],
+    max_days_per_week: int,
+    max_days_override_shift_employee_pairs: set[tuple[str, str]],
+    allow_max_days_override: bool,
+) -> tuple[bool, bool]:
+    week_key = _week_start_iso(shift.date)
+    day_key = shift.date.isoformat()
+    worked_days = days_worked_by_employee_week[(employee_id, week_key)]
+    if day_key in worked_days:
+        return True, False
+    if len(worked_days) < max_days_per_week:
+        return True, False
+    if allow_max_days_override or (shift.id, employee_id) in max_days_override_shift_employee_pairs:
+        return True, True
+    return False, False
 
 
 def _availability_index(
@@ -43,6 +75,7 @@ def _is_eligible(
     hours_by_employee: Dict[str, float],
     assigned_shifts_by_employee: Dict[str, List[Shift]],
     shift_hours: float,
+    max_hours_limit: Dict[str, float],
 ) -> bool:
     if (employee.id, shift.date.isoformat()) in pto_set:
         return False
@@ -53,7 +86,7 @@ def _is_eligible(
     if not any(start_min >= s and end_min <= e for s, e in slots):
         return False
 
-    if hours_by_employee[employee.id] + shift_hours > employee.max_weekly_hours:
+    if hours_by_employee[employee.id] + shift_hours > max_hours_limit[employee.id]:
         return False
 
     for other_shift in assigned_shifts_by_employee[employee.id]:
@@ -66,6 +99,10 @@ def _is_eligible(
     return True
 
 
+def _is_owner_employee(employee: Employee) -> bool:
+    return employee.role == Role.OWNER or employee.id.upper() == "OWNER_ID"
+
+
 def generate_baseline_schedule(
     *,
     week_start_seed: int,
@@ -75,32 +112,32 @@ def generate_baseline_schedule(
     shifts: List[Shift],
     default_required_staff: int = 2,
     role_cover_map: Dict[str, set[str]] | None = None,
+    redo_reason: str | None = None,
+    exclude_owner: bool = False,
+    max_days_override_shift_employee_pairs: set[tuple[str, str]] | None = None,
+    allow_max_days_override: bool = False,
+    max_days_per_week: int = 5,
 ) -> List[Assignment]:
-    """
-    Baseline scheduler (for analytics): randomized, minimal strategy.
-
-    What it does:
-    - Tries to staff each shift up to required staff count.
-    - Still respects hard constraints (availability/PTO/max hours/no overlap).
-    - Does NOT optimize fairness or role priority ordering.
-
-    Connection to analytics:
-    - Because it is consistently \"worse\" than optimized, we can compute %
-      improvements across weeks (baseline vs optimized).
-    """
     rng = random.Random(week_start_seed)
     availability_map = _availability_index(availability)
     pto_set = _pto_index(pto)
     hours_by_employee: Dict[str, float] = defaultdict(float)
     assigned_shifts_by_employee: Dict[str, List[Shift]] = defaultdict(list)
+    days_worked_by_employee_week: Dict[Tuple[str, str], set[str]] = defaultdict(set)
+    period_multiplier = _period_hour_multiplier(shifts)
+    max_hours_limit = {
+        employee.id: employee.max_weekly_hours * period_multiplier for employee in employees
+    }
 
     assignments: List[Assignment] = []
 
     role_cover_map = role_cover_map or {}
+    max_days_override_shift_employee_pairs = max_days_override_shift_employee_pairs or set()
+    _ = redo_reason
 
     for shift in shifts:
         start_min, end_min = _shift_minutes(shift)
-        _ = (start_min, end_min)  # kept for readability symmetry
+        _ = (start_min, end_min)
         shift_hours = _shift_hours(shift)
 
         required_staff = getattr(shift, "required_staff", None) or default_required_staff
@@ -108,48 +145,29 @@ def generate_baseline_schedule(
         if shift.required_role:
             allowed_roles = role_cover_map.get(shift.required_role, {shift.required_role})
 
-        # Step 1: pick a leader if possible; otherwise owner works.
         shuffled = employees[:]
         rng.shuffle(shuffled)
+        non_owner_shuffled = [employee for employee in shuffled if not _is_owner_employee(employee)]
+        if shift_hours <= 4.5:
+            non_owner_shuffled.sort(key=lambda e: (e.employment_type != EmploymentType.PART_TIME, e.id))
 
-        leader = next(
-            (
-                e
-                for e in shuffled
-                if e.role in [Role.MANAGER, Role.SHIFT_LEAD]
-                and (not shift.required_category or e.category == shift.required_category)
-                and (allowed_roles is None or any(r in allowed_roles for r in e.job_roles))
-                and _is_eligible(
-                    e,
-                    shift,
-                    pto_set,
-                    availability_map,
-                    hours_by_employee,
-                    assigned_shifts_by_employee,
-                    shift_hours,
-                )
-            ),
-            None,
-        )
-
-        if leader:
-            assignments.append(Assignment(shift_id=shift.id, employee_id=leader.id))
-            assigned_shifts_by_employee[leader.id].append(shift)
-            hours_by_employee[leader.id] += shift_hours
-        else:
-            assignments.append(Assignment(shift_id=shift.id, employee_id="OWNER_ID"))
-
-        remaining = max(0, required_staff - 1)
-
-        # Step 2: fill remaining slots with any eligible regular employees (random order).
-        for e in shuffled:
+        remaining = required_staff
+        for e in non_owner_shuffled:
             if remaining <= 0:
                 break
-            if e.role != Role.REGULAR:
+            if not (allowed_roles is None or any(r in allowed_roles for r in e.job_roles)):
                 continue
             if shift.required_category and e.category != shift.required_category:
                 continue
-            if allowed_roles is not None and not any(r in allowed_roles for r in e.job_roles):
+            allowed_by_days, needs_days_override = _max_days_decision(
+                employee_id=e.id,
+                shift=shift,
+                days_worked_by_employee_week=days_worked_by_employee_week,
+                max_days_per_week=max_days_per_week,
+                max_days_override_shift_employee_pairs=max_days_override_shift_employee_pairs,
+                allow_max_days_override=allow_max_days_override,
+            )
+            if not allowed_by_days:
                 continue
             if not _is_eligible(
                 e,
@@ -159,11 +177,31 @@ def generate_baseline_schedule(
                 hours_by_employee,
                 assigned_shifts_by_employee,
                 shift_hours,
+                max_hours_limit,
             ):
                 continue
-            assignments.append(Assignment(shift_id=shift.id, employee_id=e.id))
+            assignments.append(
+                Assignment(
+                    shift_id=shift.id,
+                    employee_id=e.id,
+                    override=needs_days_override,
+                    override_reason="COVERAGE_OVERRIDE_MAX_DAYS" if needs_days_override else None,
+                )
+            )
             assigned_shifts_by_employee[e.id].append(shift)
             hours_by_employee[e.id] += shift_hours
+            days_worked_by_employee_week[(e.id, _week_start_iso(shift.date))].add(shift.date.isoformat())
+            remaining -= 1
+
+        while remaining > 0 and not exclude_owner:
+            assignments.append(
+                Assignment(
+                    shift_id=shift.id,
+                    employee_id="OWNER_ID",
+                    override=True,
+                    override_reason="OWNER_LAST_RESORT_INFEASIBLE",
+                )
+            )
             remaining -= 1
 
     return assignments

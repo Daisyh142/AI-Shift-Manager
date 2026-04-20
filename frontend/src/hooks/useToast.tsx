@@ -16,12 +16,10 @@ interface ToastContextValue {
 
 const ToastContext = createContext<ToastContextValue | undefined>(undefined)
 
-// Generates a unique ID for each toast message.
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-// Provides toast state and the `toast()` trigger — auto-dismisses after 3.5 s.
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([])
 
@@ -41,7 +39,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return <ToastContext.Provider value={contextValue}>{children}</ToastContext.Provider>
 }
 
-// Hook to trigger toasts — must be used inside ToastProvider.
 export function useToast() {
   const context = useContext(ToastContext)
   if (!context) {

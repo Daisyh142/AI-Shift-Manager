@@ -1,29 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Set
 
 from sqlmodel import Session, delete, select
 
 from .models import JobRole, JobRoleCanCover, JobRoleCoverClosure
 
+logger = logging.getLogger(__name__)
+
 
 def recompute_job_role_closure(session: Session) -> int:
-    """
-    Computes and stores the transitive closure of job-role coverage.
-
-    We store, for each required_role, the set of role_names that can cover it.
-
-    Why this exists (connection to scheduling):
-    - Scheduling does eligibility checks constantly.
-    - Instead of doing DFS every time, we do DFS once here and store results in SQL.
-    - Then eligibility becomes a constant-time set membership check.
-    """
     roles = [r.name for r in session.exec(select(JobRole)).all()]
 
-    # Reverse adjacency: required_role -> roles that can cover it directly
     reverse_adj: Dict[str, list[str]] = defaultdict(list)
     for edge in session.exec(select(JobRoleCanCover)).all():
         reverse_adj[edge.to_role].append(edge.from_role)
@@ -39,9 +31,8 @@ def recompute_job_role_closure(session: Session) -> int:
             seen.add(parent)
             dfs(parent, seen)
 
-    # Reset closure table and repopulate deterministically.
     session.exec(delete(JobRoleCoverClosure))
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for required in sorted(roles):
         seen: Set[str] = {required}  # a role always covers itself
@@ -59,10 +50,6 @@ def recompute_job_role_closure(session: Session) -> int:
 
 
 def cover_set_for_required_role(session: Session, required_role: str) -> set[str]:
-    """
-    Load the cached cover set for a required role.
-    If missing (fresh DB), recompute once.
-    """
     row = session.get(JobRoleCoverClosure, required_role)
     if not row:
         recompute_job_role_closure(session)
@@ -72,5 +59,7 @@ def cover_set_for_required_role(session: Session, required_role: str) -> set[str
     try:
         return set(json.loads(row.covers_json))
     except json.JSONDecodeError:
+        logger.exception("Invalid covers_json for required_role=%s", required_role)
+        print(f"[coverage] Invalid closure JSON for required_role={required_role}; defaulting to self-cover set.")
         return {required_role}
 

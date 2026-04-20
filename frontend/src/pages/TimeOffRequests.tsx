@@ -9,7 +9,6 @@ import { RequestCard } from '@/components/RequestCard'
 import { useToast } from '@/hooks/useToast'
 import { Calendar, ClipboardList } from 'lucide-react'
 
-// Returns a YYYY-MM-DD string for today + `days` which is used to pre-fill the date input.
 function getDefaultDatePlusDays(days: number) {
   const date = new Date()
   date.setDate(date.getDate() + days)
@@ -27,7 +26,6 @@ const ERROR_MESSAGES: Record<string, string> = {
   cannot_approve_pto_insufficient_balance: 'This employee has insufficient PTO balance to approve this request.',
 }
 
-// Converts raw backend error codes to readable sentences.
 function friendlyError(err: unknown): string {
   const raw = err instanceof Error ? err.message : ''
   return ERROR_MESSAGES[raw] ?? (raw || 'Something went wrong. Please try again.')
@@ -75,6 +73,7 @@ export function TimeOffRequests() {
       void queryClient.invalidateQueries({ queryKey: ['time-off-requests'] })
     },
     onError: (err) => {
+      console.error('Time-off submit failed', err)
       const message = friendlyError(err)
       setError(message)
       toast({ title: 'Submit failed', description: message, variant: 'error' })
@@ -88,6 +87,7 @@ export function TimeOffRequests() {
       void queryClient.invalidateQueries({ queryKey: ['time-off-requests'] })
     },
     onError: (err) => {
+      console.error('Time-off approval failed', err)
       toast({ title: 'Approval failed', description: friendlyError(err), variant: 'error' })
     },
   })
@@ -99,6 +99,7 @@ export function TimeOffRequests() {
       void queryClient.invalidateQueries({ queryKey: ['time-off-requests'] })
     },
     onError: (err) => {
+      console.error('Time-off denial failed', err)
       toast({ title: 'Action failed', description: friendlyError(err), variant: 'error' })
     },
   })

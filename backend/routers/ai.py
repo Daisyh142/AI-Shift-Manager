@@ -11,16 +11,24 @@ from ..schemas import (
     AIKpiResponse,
     AIChatRequest,
     AIChatResponse,
+    AIHealthResponse,
 )
 from ..services.ai_service import (
     execute_confirmed_action,
     generate_chat_response,
+    get_ai_health,
     get_ai_kpis,
     log_decision_feedback,
 )
 from .auth import require_owner
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+
+
+@router.get("/health", response_model=AIHealthResponse)
+def ai_health(_owner=Depends(require_owner)) -> AIHealthResponse:
+    ok, provider, error_code, message = get_ai_health()
+    return AIHealthResponse(ok=ok, provider=provider, error_code=error_code, message=message)
 
 
 @router.post("/chat", response_model=AIChatResponse)

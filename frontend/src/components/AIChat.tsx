@@ -1,7 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Sparkles } from 'lucide-react'
 import { apiClient, type AIActionPayload, type AIRecommendation } from '@/lib/api'
 import { ApiError } from '@/lib/api'
@@ -17,23 +16,88 @@ interface Message {
 interface AIChatProps {
   scheduleRunId?: number | null
   onActionExecuted?: () => void
+  onScheduleRegenerated?: (runId: number) => void
 }
 
-export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
+function isRegenerateIntent(message: string) {
+  const normalized = message.trim().toLowerCase()
+  return (
+    normalized.startsWith('regenerate:') ||
+    normalized.startsWith('redo:') ||
+    normalized.includes('regenerate schedule')
+  )
+}
+
+function toUnavailableLabel(category: string) {
+  if (category === 'unauthorized') return 'AI unavailable (401 unauthorized)'
+  if (category === 'missing_api_key') return 'AI unavailable (missing API key)'
+  if (category === 'timeout') return 'AI unavailable (timeout)'
+  return 'AI unavailable (server error)'
+}
+
+function categorizeFrontendError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) return 'unauthorized'
+    const normalized = err.message.toLowerCase()
+    if (normalized.includes('api key') || normalized.includes('api_key')) return 'missing_api_key'
+    if (normalized.includes('timeout') || normalized.includes('timed out')) return 'timeout'
+    return 'server_error'
+  }
+  if (err instanceof Error) {
+    const normalized = err.message.toLowerCase()
+    if (normalized.includes('timeout') || normalized.includes('timed out')) return 'timeout'
+  }
+  return 'server_error'
+}
+
+export function AIChat({ scheduleRunId, onActionExecuted, onScheduleRegenerated }: AIChatProps) {
   const { toast } = useToast()
   const [input, setInput] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [isExecutingAction, setIsExecutingAction] = useState<string | null>(null)
+  const [pendingIntentToken, setPendingIntentToken] = useState<string | null>(null)
   const [dismissedActions, setDismissedActions] = useState<Record<string, true>>({})
+  const [connectionState, setConnectionState] = useState<{
+    checked: boolean
+    connected: boolean
+    provider?: string
+    errorCode?: string | null
+  }>({ checked: false, connected: false })
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
       content:
-        'AI assistant is connected. Ask about fairness, coverage, or what to improve before regenerating a schedule.',
+        'Checking AI connection... Ask about fairness, coverage, or what to improve before regenerating a schedule.',
     },
   ])
 
-  // Sends the current input to the AI chat endpoint and appends the response.
+  useEffect(() => {
+    let mounted = true
+    apiClient
+      .getAIHealth()
+      .then((health) => {
+        if (!mounted) return
+        setConnectionState({
+          checked: true,
+          connected: health.ok,
+          provider: health.provider,
+          errorCode: health.error_code ?? null,
+        })
+      })
+      .catch((err) => {
+        console.error('AI health check failed', err)
+        if (!mounted) return
+        setConnectionState({
+          checked: true,
+          connected: false,
+          errorCode: categorizeFrontendError(err),
+        })
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
   async function sendMessage() {
     const trimmed = input.trim()
     if (!trimmed || isSending) return
@@ -44,11 +108,53 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
     setIsSending(true)
     setInput('')
     try {
+      if (isRegenerateIntent(trimmed)) {
+        if (!scheduleRunId) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: 'Generate a schedule first, then ask me to regenerate it with a reason.',
+            },
+          ])
+          return
+        }
+
+        const redoResponse = await apiClient.redoSchedule(scheduleRunId, trimmed)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `I started regeneration using your reason: "${trimmed}". New run #${redoResponse.schedule_run_id} is ready.`,
+          },
+        ])
+        onScheduleRegenerated?.(redoResponse.schedule_run_id)
+        onActionExecuted?.()
+        return
+      }
+
       const response = await apiClient.chatAI({
         message: trimmed,
-        context: scheduleRunId ? { schedule_run_id: scheduleRunId } : undefined,
+        context: scheduleRunId || pendingIntentToken
+          ? {
+              schedule_run_id: scheduleRunId ?? undefined,
+              pending_intent_token: pendingIntentToken ?? undefined,
+            }
+          : undefined,
         mode: 'recommendation_only',
       })
+      if (response.error_code) {
+        console.error('AI chat returned provider error', response.error_code, response.assistant_message)
+        const unavailableLabel = toUnavailableLabel(response.error_code)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `${unavailableLabel}. ${response.assistant_message}`,
+          },
+        ])
+        return
+      }
       setMessages((prev) => [
         ...prev,
         {
@@ -58,8 +164,21 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
           actionPayload: response.action_payload ?? null,
         },
       ])
+      if (response.pending_intent_token) {
+        setPendingIntentToken(response.pending_intent_token)
+      } else if (response.new_schedule_run_id != null) {
+        setPendingIntentToken(null)
+      }
+      if (response.new_schedule_run_id != null) {
+        onScheduleRegenerated?.(response.new_schedule_run_id)
+        onActionExecuted?.()
+      }
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'AI is unavailable right now. Please try again.'
+      console.error('AI chat request failed', err)
+      const message =
+        err instanceof ApiError
+          ? `Unable to apply chat request right now: ${err.message}`
+          : 'Unable to apply chat request right now. Please try again.'
       setMessages((prev) => [
         ...prev,
         {
@@ -72,7 +191,6 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
     }
   }
 
-  // Executes a confirmed AI action through the deterministic backend endpoint.
   async function confirmAction(actionPayload: AIActionPayload) {
     const actionKey = `${actionPayload.action_type}-${JSON.stringify(actionPayload.params)}`
     setIsExecutingAction(actionKey)
@@ -85,6 +203,7 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
       })
       onActionExecuted?.()
     } catch (err) {
+      console.error('AI execute action failed', err)
       toast({
         title: 'Action failed',
         description: err instanceof Error ? err.message : 'Unable to execute confirmed action.',
@@ -95,7 +214,6 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
     }
   }
 
-  // Dismisses an AI action and logs the rejection for observability.
   async function rejectAction(actionPayload: AIActionPayload) {
     const actionKey = `${actionPayload.action_type}-${JSON.stringify(actionPayload.params)}`
     setDismissedActions((prev) => ({ ...prev, [actionKey]: true }))
@@ -105,25 +223,32 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
         decision: 'rejected',
         schedule_run_id: scheduleRunId ?? undefined,
       })
-    } catch {
-      // Non-blocking — a failed feedback log should never interrupt the owner's flow.
+    } catch (err) {
+      console.error('AI feedback logging failed', err)
     }
     toast({ title: 'Action skipped', description: 'No changes were applied.' })
   }
 
   return (
-    <Card className="border-primary/15">
-      <CardHeader>
+    <Card className="border-primary/15 flex flex-col">
+      <CardHeader className="shrink-0">
         <CardTitle className="flex items-center gap-2 text-base">
           <Sparkles className="h-4 w-4 text-primary" />
-          Shift Manager AI Assistant (Placeholder)
+          Shift Manager AI Assistant
         </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          {!connectionState.checked
+            ? 'Status: Checking connection...'
+            : connectionState.connected
+              ? `Status: Connected (${connectionState.provider ?? 'provider ready'})`
+              : `Status: ${toUnavailableLabel(connectionState.errorCode ?? 'server_error')}`}
+        </p>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="max-h-64 space-y-2 overflow-auto rounded-xl border bg-muted/30 p-3">
+      <CardContent className="flex flex-col space-y-3">
+        <div className="max-h-[200px] space-y-2 overflow-y-auto py-1 text-sm">
           {messages.map((message, index) => (
-            <div className="space-y-2" key={`${message.role}-${index}`}>
-              <p className="text-sm leading-relaxed">
+            <div className="space-y-1" key={`${message.role}-${index}`}>
+              <p className="leading-relaxed">
                 <span className="font-semibold capitalize">{message.role}:</span> {message.content}
               </p>
               {message.role === 'assistant' &&
@@ -186,12 +311,18 @@ export function AIChat({ scheduleRunId, onActionExecuted }: AIChatProps) {
           ))}
         </div>
         <div className="flex gap-2">
-          <Input
+          <textarea
+            className="min-h-[4.5rem] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            maxLength={2000}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') sendMessage()
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                sendMessage()
+              }
             }}
-            placeholder="Ask about schedule fairness..."
+            placeholder="Ask about fairness, coverage, or what to improve..."
+            rows={3}
             value={input}
           />
           <Button disabled={isSending} onClick={sendMessage} type="button">

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..models import Assignment as DbAssignment, ScheduleRun, TimeOffRequest
-from .auth import require_owner
+from .auth import require_employee_or_owner, require_owner
 from ..schemas import (
     Assignment,
     FairnessChartsResponse,
@@ -22,7 +22,12 @@ from ..schemas import (
     ScheduleResponse,
     ScheduleRunResponse,
 )
-from ..services.scheduling_service import build_period_inputs, generate_and_persist_schedule
+import logging
+
+from ..services.scheduling_service import generate_and_persist_schedule
+from ..services.ai_service import generate_schedule_with_ai_orchestration
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -32,18 +37,23 @@ def current_week_start() -> date:
     return today - timedelta(days=today.weekday())
 
 
+def _schedule_status_from_violations(violations: list[str]) -> str:
+    hard_markers = (
+        "UNDERSTAFFED_SHIFT:",
+        "MISSING_MANAGER_COVERAGE:",
+        "MISSING_CATEGORY_COVERAGE:",
+        "MAX_DAYS_PER_WEEK_EXCEEDED:",
+        "infeasible_",
+    )
+    return "infeasible" if any(v.startswith(hard_markers) for v in violations) else "success"
+
+
 @router.get("/latest", response_model=ScheduleRunSummary)
 def get_latest_schedule_run(
     status: str = Query(default="published", pattern="^(draft|published)$"),
+    _current_user = Depends(require_employee_or_owner),
     session: Session = Depends(get_session),
 ) -> ScheduleRunSummary:
-    """
-    Return the most recent schedule run for a given status.
-
-    Frontend use:
-    - employee pages request latest published run
-    - owner pages can request latest draft run if needed
-    """
     run = session.exec(
         select(ScheduleRun)
         .where(ScheduleRun.status == status)
@@ -65,39 +75,57 @@ def get_latest_schedule_run(
 def generate_schedule_from_db(
     request: GenerateDbScheduleRequest,
     mode: str = Query(default="optimized", pattern="^(baseline|optimized)$"),
+    use_ai: bool = Query(default=True, description="Set false to skip AI analysis and return the schedule immediately."),
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> ScheduleRunResponse:
-    """
-    Generates a schedule using data already stored in SQLite.
-
-    Connection to the rest of the app:
-    - Reads employees/availability/PTO/shifts from DB
-    - Calls baseline or optimized scheduler
-    - Persists schedule_run + assignments
-    - Returns schedule JSON to the frontend
-    """
     week_start = request.week_start_date or current_week_start()
-    run = generate_and_persist_schedule(session=session, week_start_date=week_start, mode=mode)
 
-    # Rebuild schedule response from DB so the API is a single source of truth.
-    employees, availability, pto, shifts = build_period_inputs(session, week_start)
-    _ = (employees, availability, pto, shifts)
+    run_id, ai_summary = generate_schedule_with_ai_orchestration(
+        session=session,
+        week_start_date=week_start,
+        mode=mode,
+        use_ai=use_ai,
+    )
+
+    session.expire_all()
+
+    run = session.get(ScheduleRun, run_id)
+    if not run:
+        logger.error("generate_schedule: run_id=%s not found after commit", run_id)
+        raise HTTPException(status_code=500, detail="schedule_run_missing_after_generation")
 
     db_assignments = session.exec(
-        select(DbAssignment).where(DbAssignment.schedule_run_id == run.id)
+        select(DbAssignment).where(DbAssignment.schedule_run_id == run_id)
     ).all()
-    assignments = [Assignment(shift_id=a.shift_id, employee_id=a.employee_id) for a in db_assignments]
+    assignments = [
+        Assignment(
+            shift_id=a.shift_id,
+            employee_id=a.employee_id,
+            override=bool(getattr(a, "override", False)),
+            override_reason=getattr(a, "override_reason", None),
+        )
+        for a in db_assignments
+    ]
 
+    violations = json.loads(run.violations_json)
     schedule = ScheduleResponse(
         week_start_date=run.week_start_date,
+        status=_schedule_status_from_violations(violations),
         assignments=assignments,
-        violations=json.loads(run.violations_json),
+        violations=violations,
         fairness_scores=json.loads(run.fairness_json),
         overall_score=run.overall_score,
     )
 
-    return ScheduleRunResponse(schedule_run_id=run.id, schedule=schedule)
+    logger.info(
+        "generate_schedule: returning run_id=%s assignments=%s violations=%s ai_summary_len=%s",
+        run_id,
+        len(assignments),
+        len(violations),
+        len(ai_summary or ""),
+    )
+    return ScheduleRunResponse(schedule_run_id=run_id, schedule=schedule, ai_summary=ai_summary)
 
 
 @router.get("/{schedule_run_id}", response_model=ScheduleRunResponse)
@@ -112,12 +140,22 @@ def get_schedule_run(
     db_assignments = session.exec(
         select(DbAssignment).where(DbAssignment.schedule_run_id == run.id)
     ).all()
-    assignments = [Assignment(shift_id=a.shift_id, employee_id=a.employee_id) for a in db_assignments]
+    assignments = [
+        Assignment(
+            shift_id=a.shift_id,
+            employee_id=a.employee_id,
+            override=bool(getattr(a, "override", False)),
+            override_reason=getattr(a, "override_reason", None),
+        )
+        for a in db_assignments
+    ]
 
+    violations = json.loads(run.violations_json)
     schedule = ScheduleResponse(
         week_start_date=run.week_start_date,
+        status=_schedule_status_from_violations(violations),
         assignments=assignments,
-        violations=json.loads(run.violations_json),
+        violations=violations,
         fairness_scores=json.loads(run.fairness_json),
         overall_score=run.overall_score,
     )
@@ -130,13 +168,6 @@ def get_fairness_charts(
     schedule_run_id: int,
     session: Session = Depends(get_session),
 ) -> FairnessChartsResponse:
-    """
-    Chart-ready fairness data for the frontend.
-
-    Two pie charts:
-    - overall: Fair vs Unmet (100 - overall_score)
-    - employees: one slice per employee_id using their fairness percentage
-    """
     run = session.get(ScheduleRun, schedule_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="schedule_run_not_found")
@@ -162,19 +193,12 @@ def publish_schedule(
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> PublishScheduleResponse:
-    """
-    Owner publishes a schedule after reviewing it.
-
-    Connection to the rest of the app:
-    - Frontend should show schedules in \"draft\" for owner review
-    - Employees (later) should only see \"published\"
-    """
     run = session.get(ScheduleRun, schedule_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="schedule_run_not_found")
 
     run.status = "published"
-    run.published_at = datetime.utcnow()
+    run.published_at = datetime.now(timezone.utc)
     session.add(run)
     session.commit()
     session.refresh(run)
@@ -192,34 +216,41 @@ def redo_schedule(
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> ScheduleRunResponse:
-    """
-    Owner requests a redo (must provide a reason).
-
-    Today this \"redo\" re-runs the scheduler. Later, when Gemini generation is added,
-    this reason will also be fed into the prompt so the AI favors the owner's terms.
-    """
     prev = session.get(ScheduleRun, schedule_run_id)
     if not prev:
         raise HTTPException(status_code=404, detail="schedule_run_not_found")
 
-    # Re-run using the same mode by default.
     run = generate_and_persist_schedule(
         session=session,
         week_start_date=prev.week_start_date,
         mode=prev.mode,
         redo_of_schedule_run_id=prev.id,
         redo_reason=request.reason,
+        schedule_options={
+            "exclude_owner": request.exclude_owner,
+            "allow_max_days_override": request.allow_max_days_override,
+        },
     )
 
     db_assignments = session.exec(
         select(DbAssignment).where(DbAssignment.schedule_run_id == run.id)
     ).all()
-    assignments = [Assignment(shift_id=a.shift_id, employee_id=a.employee_id) for a in db_assignments]
+    assignments = [
+        Assignment(
+            shift_id=a.shift_id,
+            employee_id=a.employee_id,
+            override=bool(getattr(a, "override", False)),
+            override_reason=getattr(a, "override_reason", None),
+        )
+        for a in db_assignments
+    ]
 
+    violations = json.loads(run.violations_json)
     schedule = ScheduleResponse(
         week_start_date=run.week_start_date,
+        status=_schedule_status_from_violations(violations),
         assignments=assignments,
-        violations=json.loads(run.violations_json),
+        violations=violations,
         fairness_scores=json.loads(run.fairness_json),
         overall_score=run.overall_score,
     )
@@ -228,8 +259,8 @@ def redo_schedule(
 
 class OwnerRemoveEmployeeRequest(RedoScheduleRequest):
     employee_id: str
-    start_date: str  # ISO date
-    end_date: str  # ISO date
+    start_date: str
+    end_date: str
 
 
 @router.post("/{schedule_run_id}/remove-employee", response_model=ScheduleRunResponse)
@@ -239,13 +270,6 @@ def owner_remove_employee_and_regenerate(
     _owner = Depends(require_owner),
     session: Session = Depends(get_session),
 ) -> ScheduleRunResponse:
-    """
-    Owner removes an employee from a date range (reason required), then regenerates.
-
-    Implementation approach:
-    - We write APPROVED request_off rows into TimeOffRequest (owner override).
-    - We then redo the schedule for that week, passing the owner's reason.
-    """
     run = session.get(ScheduleRun, schedule_run_id)
     if not run:
         raise HTTPException(status_code=404, detail="schedule_run_not_found")
@@ -254,6 +278,9 @@ def owner_remove_employee_and_regenerate(
         start = datetime.fromisoformat(request.start_date).date()
         end = datetime.fromisoformat(request.end_date).date()
     except ValueError:
+        print(
+            f"[schedules] Invalid owner remove date range: start={request.start_date!r}, end={request.end_date!r}."
+        )
         raise HTTPException(status_code=400, detail="invalid_date_format_use_iso")
 
     if end < start:
@@ -274,7 +301,7 @@ def owner_remove_employee_and_regenerate(
                 status=TimeOffStatus.APPROVED.value,
                 hours=0.0,
                 reason=request.reason,
-                decided_at=datetime.utcnow(),
+                decided_at=datetime.now(timezone.utc),
             )
         )
         current = current + timedelta(days=1)
@@ -287,17 +314,31 @@ def owner_remove_employee_and_regenerate(
         mode=run.mode,
         redo_of_schedule_run_id=run.id,
         redo_reason=request.reason,
+        schedule_options={
+            "exclude_owner": request.exclude_owner,
+            "allow_max_days_override": request.allow_max_days_override,
+        },
     )
 
     db_assignments = session.exec(
         select(DbAssignment).where(DbAssignment.schedule_run_id == new_run.id)
     ).all()
-    assignments = [Assignment(shift_id=a.shift_id, employee_id=a.employee_id) for a in db_assignments]
+    assignments = [
+        Assignment(
+            shift_id=a.shift_id,
+            employee_id=a.employee_id,
+            override=bool(getattr(a, "override", False)),
+            override_reason=getattr(a, "override_reason", None),
+        )
+        for a in db_assignments
+    ]
 
+    violations = json.loads(new_run.violations_json)
     schedule = ScheduleResponse(
         week_start_date=new_run.week_start_date,
+        status=_schedule_status_from_violations(violations),
         assignments=assignments,
-        violations=json.loads(new_run.violations_json),
+        violations=violations,
         fairness_scores=json.loads(new_run.fairness_json),
         overall_score=new_run.overall_score,
     )

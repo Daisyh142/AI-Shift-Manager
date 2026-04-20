@@ -23,15 +23,9 @@ def analytics_summary(
     mode: str = Query(default="optimized", pattern="^(baseline|optimized)$"),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """
-    Aggregated metrics over schedule runs in a period-start date range.
-
-    Metrics are derived using SQL joins against Shift + Assignment.
-    """
     start_d = _parse_date(start)
     end_d = _parse_date(end)
 
-    # Understaffing per run (14-day window per schedule_run)
     understaff_sql = text(
         """
         WITH assigned AS (
@@ -89,11 +83,6 @@ def analytics_compare(
     end: str = Query(..., description="ISO date, inclusive (period start)"),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """
-    Compare baseline vs optimized runs over a date range.
-
-    Returns averages plus % deltas (optimized compared to baseline).
-    """
     start_d = _parse_date(start)
     end_d = _parse_date(end)
 

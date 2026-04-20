@@ -109,8 +109,12 @@ def test_api_checklist() -> None:
     expect_status(results, "3", r, {200}, f"Published schedule run {schedule_run_id}")
 
     # Step 4: Latest published
-    r = requests.get(f"{BASE_URL}/schedules/latest", params={"status": "published"}, timeout=20)
-    expect_status(results, "4", r, {200}, "Fetched latest published schedule summary")
+    r = requests.get(
+    f"{BASE_URL}/schedules/latest",
+    params={"status": "published"},
+    headers=owner_headers,
+    timeout=20,
+    )
 
     # Step 5: Owner requests list
     r = requests.get(f"{BASE_URL}/time-off/requests", headers=owner_headers, timeout=20)

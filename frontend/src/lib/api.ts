@@ -25,6 +25,7 @@ export interface Employee {
   required_weekly_hours: number
   role: string
   employment_type: string
+  active: boolean
   pto_balance_hours: number
   category: string
 }
@@ -51,15 +52,46 @@ export interface TimeOffRequestResponse {
   decided_at: string | null
 }
 
+export interface CoverageRequestResponse {
+  id: number
+  requester_employee_id: string
+  shift_id: string
+  status: 'pending' | 'approved' | 'denied'
+  reason: string | null
+  decision_note: string | null
+  cover_employee_id: string | null
+  created_at: string | null
+  decided_at: string | null
+}
+
+export interface HoursRequestResponse {
+  id: number
+  employee_id: string
+  period_start: string
+  period_end: string
+  requested_hours: number
+  status: 'pending' | 'approved' | 'denied'
+  note: string | null
+  created_at: string | null
+  decided_at: string | null
+}
+
 export interface FairnessScore {
   employee_id: string
   percentage: number
   reasoning: string[]
+  assigned_hours?: number
+  requested_hours?: number
+  delta_hours?: number
+  max_hours?: number
+  utilization?: number
 }
 
 export interface Assignment {
   shift_id: string
   employee_id: string
+  override?: boolean
+  override_reason?: string | null
 }
 
 export interface ScheduleResponse {
@@ -73,6 +105,7 @@ export interface ScheduleResponse {
 export interface ScheduleRunResponse {
   schedule_run_id: number
   schedule: ScheduleResponse
+  ai_summary?: string | null
 }
 
 export interface ScheduleRunSummary {
@@ -129,6 +162,7 @@ export interface AIContextPointers {
   schedule_run_id?: number
   request_id?: number
   employee_id?: string
+  pending_intent_token?: string
 }
 
 export interface AIChatRequest {
@@ -160,6 +194,26 @@ export interface AIChatResponse {
   recommendations: AIRecommendation[]
   action_payload?: AIActionPayload | null
   execution_mode: 'recommendation_only' | 'assistive'
+  new_schedule_run_id?: number | null
+  error_code?: string | null
+  follow_up_questions?: string[]
+  pending_intent_token?: string | null
+}
+
+export interface ScheduleChangeRequest {
+  type: 'ADJUST_HOURS' | 'SET_UTILIZATION_TARGET'
+  employee_id: string
+  period_start: string
+  delta_hours?: number | null
+  target_utilization?: number | null
+  strict?: boolean
+  tradeoff_policy?: string
+  constraints?: {
+    max_days_per_week?: number
+    avoid_shift_ranges?: string[]
+    prefer_shift_ranges?: string[]
+  }
+  reason: string
 }
 
 export interface AIActionExecuteResponse {
@@ -185,7 +239,13 @@ export interface AIKpiResponse {
   conflict_resolution_success_rate_percent: number
 }
 
-// Typed error that carries the HTTP status code alongside the message.
+export interface AIHealthResponse {
+  ok: boolean
+  provider: string
+  message: string
+  error_code?: string | null
+}
+
 export class ApiError extends Error {
   status: number
 
@@ -204,7 +264,6 @@ export function setAuthFailureHandler(handler: (() => void) | null) {
   authFailureHandler = handler
 }
 
-// Central fetch wrapper — attaches auth token, parses JSON, and throws ApiError on non-2xx responses.
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
@@ -237,7 +296,6 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T
 }
 
-// All API calls go through this object so they share the same auth and base URL.
 export const apiClient = {
   register(payload: { email: string; password: string; role?: UserRole }) {
     return apiFetch<TokenResponse>('/auth/register', {
@@ -322,11 +380,67 @@ export const apiClient = {
       body: JSON.stringify(payload),
     })
   },
+  createCoverageRequest(payload: {
+    requester_employee_id: string
+    shift_id: string
+    reason?: string
+  }) {
+    return apiFetch<CoverageRequestResponse>('/coverage-requests', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+  listMyCoverageRequests() {
+    return apiFetch<CoverageRequestResponse[]>('/coverage-requests/mine')
+  },
+  listPendingCoverageRequests() {
+    return apiFetch<CoverageRequestResponse[]>('/coverage-requests/pending')
+  },
+  decideCoverageRequest(
+    requestId: number,
+    payload: {
+      decision: 'approved' | 'denied'
+      decision_note?: string
+      cover_employee_id?: string | null
+    },
+  ) {
+    return apiFetch<CoverageRequestResponse>(`/coverage-requests/${requestId}/decision`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
+  createHoursRequest(payload: {
+    employee_id: string
+    period_start: string
+    period_end: string
+    requested_hours: number
+    note?: string
+  }) {
+    return apiFetch<HoursRequestResponse>('/hours-requests', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+  listMyHoursRequests() {
+    return apiFetch<HoursRequestResponse[]>('/hours-requests/mine')
+  },
+  listPendingHoursRequests() {
+    return apiFetch<HoursRequestResponse[]>('/hours-requests/pending')
+  },
+  decideHoursRequest(requestId: number, payload: { decision: 'approved' | 'denied' }) {
+    return apiFetch<HoursRequestResponse>(`/hours-requests/${requestId}/decision`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
   chatAI(payload: AIChatRequest) {
     return apiFetch<AIChatResponse>('/ai/chat', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+  },
+  getAIHealth() {
+    return apiFetch<AIHealthResponse>('/ai/health')
   },
   executeAIAction(action_payload: AIActionPayload) {
     return apiFetch<AIActionExecuteResponse>('/ai/execute-action', {

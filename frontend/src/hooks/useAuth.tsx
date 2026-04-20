@@ -17,7 +17,6 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
-// Manages auth state (token + user) and exposes login/logout/register actions via context.
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_STORAGE_KEY))
   const [user, setUser] = useState<AuthUser | null>(null)
@@ -96,7 +95,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
-// Hook to access auth state and actions — must be used inside AuthProvider.
 export function useAuth() {
   const context = useContext(AuthContext)
   if (!context) {

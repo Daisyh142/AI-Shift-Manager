@@ -13,6 +13,7 @@ __pycache__/
 # Node
 node_modules/
 frontend/dist/
+frontend/.env
 frontend/.env.local
 
 # OS

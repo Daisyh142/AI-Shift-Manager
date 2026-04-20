@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import date, time
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, Literal
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -25,6 +25,18 @@ class TimeOffStatus(str, Enum):
     DENIED = "denied"
 
 
+class CoverageRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+class HoursRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
 class Employee(BaseModel):
     id: str
     name: str
@@ -32,6 +44,7 @@ class Employee(BaseModel):
     required_weekly_hours: float = Field(ge=0)
     role: Role = Role.REGULAR
     employment_type: EmploymentType = EmploymentType.PART_TIME
+    active: bool = True
     pto_balance_hours: float = Field(default=0, ge=0)
     category: str = Field(default="general", min_length=1)
     job_roles: List[str] = []
@@ -61,6 +74,8 @@ class Shift(BaseModel):
 class Assignment(BaseModel):
     shift_id: str
     employee_id: str
+    override: bool = False
+    override_reason: Optional[str] = None
 
 class GenerateScheduleRequest(BaseModel):
     week_start_date: date
@@ -74,9 +89,33 @@ class FairnessScore(BaseModel):
     employee_id: str
     percentage: float = Field(ge=0, le=100)
     reasoning: List[str]
+    assigned_hours: float = Field(default=0, ge=0)
+    requested_hours: float = Field(default=0, ge=0)
+    delta_hours: float = 0
+    max_hours: float = Field(default=0, ge=0)
+    utilization: float = Field(default=0, ge=0, le=1)
+
+
+class ScheduleChangeConstraints(BaseModel):
+    prefer_shift_ranges: list[str] = Field(default_factory=list)
+    avoid_shift_ranges: list[str] = Field(default_factory=list)
+    max_days_per_week: int | None = Field(default=None, ge=1, le=7)
+
+
+class ScheduleChangeRequest(BaseModel):
+    type: Literal["ADJUST_HOURS", "SET_UTILIZATION_TARGET"]
+    employee_id: str
+    period_start: date
+    delta_hours: float | None = None
+    target_utilization: float | None = Field(default=None, ge=0, le=1)
+    strict: bool = False
+    tradeoff_policy: str = "LOWEST_PRIORITY_LOSES_FIRST"
+    constraints: ScheduleChangeConstraints = Field(default_factory=ScheduleChangeConstraints)
+    reason: str = Field(min_length=1)
 
 class ScheduleResponse(BaseModel):
     week_start_date: date
+    status: str = "success"  
     assignments: List[Assignment]
     violations: List[str]
     fairness_scores: List[FairnessScore] = []
@@ -90,6 +129,7 @@ class GenerateDbScheduleRequest(BaseModel):
 class ScheduleRunResponse(BaseModel):
     schedule_run_id: int
     schedule: ScheduleResponse
+    ai_summary: Optional[str] = None
 
 
 class ScheduleRunSummary(BaseModel):
@@ -102,6 +142,8 @@ class ScheduleRunSummary(BaseModel):
 
 class RedoScheduleRequest(BaseModel):
     reason: str = Field(min_length=1)
+    exclude_owner: Optional[bool] = None
+    allow_max_days_override: Optional[bool] = None
 
 
 class PublishScheduleResponse(BaseModel):
@@ -130,6 +172,55 @@ class TimeOffRequestResponse(BaseModel):
     decided_at: Optional[str] = None
 
 
+class CoverageRequestCreate(BaseModel):
+    requester_employee_id: str
+    shift_id: str
+    reason: Optional[str] = None
+
+
+class CoverageRequestDecision(BaseModel):
+    decision: CoverageRequestStatus
+    decision_note: Optional[str] = None
+    cover_employee_id: Optional[str] = None
+
+
+class CoverageRequestResponse(BaseModel):
+    id: int
+    requester_employee_id: str
+    shift_id: str
+    status: CoverageRequestStatus
+    reason: Optional[str] = None
+    decision_note: Optional[str] = None
+    cover_employee_id: Optional[str] = None
+    created_at: Optional[str] = None
+    decided_at: Optional[str] = None
+
+
+class HoursRequestCreate(BaseModel):
+    employee_id: str
+    period_start: date
+    period_end: date
+    requested_hours: int = Field(ge=0, le=80)
+    note: Optional[str] = None
+
+
+class HoursRequestDecision(BaseModel):
+    decision: HoursRequestStatus
+    decision_note: Optional[str] = None
+
+
+class HoursRequestResponse(BaseModel):
+    id: int
+    employee_id: str
+    period_start: date
+    period_end: date
+    requested_hours: int
+    status: HoursRequestStatus
+    note: Optional[str] = None
+    created_at: Optional[str] = None
+    decided_at: Optional[str] = None
+
+
 class ChartSlice(BaseModel):
     label: str
     value: float = Field(ge=0)
@@ -155,8 +246,6 @@ class ScheduleMetricsResponse(BaseModel):
     employee_fairness: list[FairnessScore]
     violations: list[str]
 
-
-# ── Auth schemas ──────────────────────────────────────────────────────────────
 
 class UserRole(str, Enum):
     OWNER = "owner"
@@ -212,6 +301,7 @@ class AIContextPointers(BaseModel):
     schedule_run_id: Optional[int] = None
     request_id: Optional[int] = None
     employee_id: Optional[str] = None
+    pending_intent_token: Optional[str] = None
 
 
 class AIChatRequest(BaseModel):
@@ -243,6 +333,17 @@ class AIChatResponse(BaseModel):
     recommendations: list[AIRecommendation] = Field(default_factory=list)
     action_payload: Optional[AIActionPayload] = None
     execution_mode: str = Field(default="recommendation_only", pattern="^(recommendation_only|assistive)$")
+    new_schedule_run_id: Optional[int] = None
+    error_code: Optional[str] = None
+    follow_up_questions: list[str] = Field(default_factory=list)
+    pending_intent_token: Optional[str] = None
+
+
+class AIHealthResponse(BaseModel):
+    ok: bool
+    provider: str
+    message: str
+    error_code: Optional[str] = None
 
 
 class AIActionExecuteRequest(BaseModel):

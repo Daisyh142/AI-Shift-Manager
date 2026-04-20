@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ArrowRight, Sparkles } from 'lucide-react'
 
 export function LoginForm() {
-  const { login, tryDemo } = useAuth()
+  const { login } = useAuth()
   const { toast } = useToast()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -29,19 +29,6 @@ export function LoginForm() {
     }
   }
 
-  async function onTryDemo() {
-    setIsSubmitting(true)
-    setError(null)
-    try {
-      await tryDemo()
-      toast({ title: 'Demo ready', description: 'Seed data loaded and owner account signed in.' })
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Demo sign in failed.')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
   return (
     <Card className="w-full max-w-md border-primary/20 shadow-[0_20px_40px_rgba(15,118,110,0.15)]">
       <CardHeader className="space-y-3">
@@ -49,7 +36,7 @@ export function LoginForm() {
           <Sparkles className="h-6 w-6 text-primary-foreground" />
         </div>
         <CardTitle className="text-2xl">Welcome back</CardTitle>
-        <CardDescription>Sign in with your account or try the demo data.</CardDescription>
+        <CardDescription>Sign in with your account.</CardDescription>
       </CardHeader>
       <CardContent>
         <form className="space-y-5" onSubmit={onSubmit}>
@@ -61,7 +48,7 @@ export function LoginForm() {
               autoComplete="email"
               id="email"
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="owner@demo.com or employee@demo.com"
+              placeholder="owner@demo.com"
               required
               type="email"
               value={email}
@@ -86,13 +73,26 @@ export function LoginForm() {
             {isSubmitting ? 'Signing in...' : 'Sign in'}
             <ArrowRight className="h-4 w-4" />
           </Button>
-          <Button className="w-full" disabled={isSubmitting} onClick={onTryDemo} type="button" variant="outline">
-            <Sparkles className="h-4 w-4" />
+          <Button
+            className="w-full"
+            disabled={isSubmitting}
+            type="button"
+            variant="outline"
+            onClick={async () => {
+              setIsSubmitting(true)
+              setError(null)
+              try {
+                await login('owner@demo.com', 'demo')
+                toast({ title: 'Signed in', description: 'Welcome back to WorkForYou.' })
+              } catch (err) {
+                setError(err instanceof ApiError ? err.message : 'Login failed. Please try again.')
+              } finally {
+                setIsSubmitting(false)
+              }
+            }}
+          >
             Try Demo Data
           </Button>
-          <p className="text-center text-xs text-muted-foreground">
-            Demo is auto seeded when you click the demo button.
-          </p>
         </form>
       </CardContent>
     </Card>

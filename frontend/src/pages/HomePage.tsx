@@ -60,8 +60,8 @@ export function HomePage() {
                 <span className="text-gradient">Happier Teams</span>
               </h1>
               <p className="mt-6 text-lg text-muted-foreground max-w-xl mx-auto lg:mx-0">
-                Let AI handle the complexity of shift scheduling. Fair distribution, easy time-off requests, and full
-                transparency for everyone.
+                This web app uses AI to make managing a team easier for you and your team. Let AI handle the complexity
+                of shift scheduling—fair distribution, easy time-off requests, and full transparency for everyone.
               </p>
 
               <div className="grid grid-cols-2 gap-4 mt-10">
@@ -89,6 +89,9 @@ export function HomePage() {
         <div className="container mx-auto">
           <div className="text-center mb-12">
             <h2 className="text-3xl md:text-4xl font-bold text-foreground">Why Teams Love ShiftAI</h2>
+            <p className="mt-3 text-muted-foreground max-w-2xl mx-auto">
+              AI-powered tools that make managing a team easier for you and your team—smarter schedules and less guesswork.
+            </p>
           </div>
           <div className="grid md:grid-cols-3 gap-8 max-w-4xl mx-auto">
             <div className="text-center p-6">

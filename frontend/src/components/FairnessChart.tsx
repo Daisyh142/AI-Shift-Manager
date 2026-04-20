@@ -7,12 +7,10 @@ interface FairnessChartProps {
   employeeNameById: Record<string, string>
 }
 
-// Keeps a percentage value within [0, 100].
 function clampPercent(value: number) {
   return Math.max(0, Math.min(100, value))
 }
 
-// Resolves an employee ID to a display name, with a special case for the owner placeholder.
 function displayEmployeeName(employeeId: string, employeeNameById: Record<string, string>) {
   if (employeeId.toLowerCase() === 'owner_id') return 'Owner'
   return employeeNameById[employeeId] ?? employeeId

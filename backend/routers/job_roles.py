@@ -17,6 +17,7 @@ def create_job_role(role: JobRole, session: Session = Depends(get_session)) -> J
         raise HTTPException(status_code=409, detail="job_role_already_exists")
     session.add(role)
     session.commit()
+    recompute_job_role_closure(session)
     session.refresh(role)
     return role
 
@@ -30,12 +31,12 @@ def list_job_roles(session: Session = Depends(get_session)) -> list[JobRole]:
 def create_job_role_edge(
     edge: JobRoleCanCover, session: Session = Depends(get_session)
 ) -> JobRoleCanCover:
-    # Validate endpoints exist
     if not session.get(JobRole, edge.from_role) or not session.get(JobRole, edge.to_role):
         raise HTTPException(status_code=400, detail="unknown_job_role_in_edge")
 
     session.add(edge)
     session.commit()
+    recompute_job_role_closure(session)
     session.refresh(edge)
     return edge
 

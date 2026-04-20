@@ -1,6 +1,6 @@
 import type { ScheduleRunResponse, Shift } from '@/lib/api'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { formatEtTime } from '@/lib/time'
 
 interface ScheduleGridProps {
   scheduleRun: ScheduleRunResponse
@@ -11,7 +11,14 @@ interface ScheduleGridProps {
   emptyMessage?: string
 }
 
-// Generates an array of 14 consecutive day entries starting from weekStartDate.
+interface ShiftCard {
+  id: string
+  startTime: string
+  endTime: string
+  employeeLabel: string
+  roleLabel: string
+}
+
 function buildTwoWeekDays(weekStartDate: Date) {
   return Array.from({ length: 14 }, (_, index) => {
     const date = new Date(weekStartDate)
@@ -22,7 +29,6 @@ function buildTwoWeekDays(weekStartDate: Date) {
   })
 }
 
-// Returns a display label for a shift based on its required role or time of day.
 function shiftRoleLabel(shift: Shift) {
   if (shift.required_role) return formatRoleLabel(shift.required_role)
   if (shift.required_category) return formatRoleLabel(shift.required_category)
@@ -33,7 +39,6 @@ function shiftRoleLabel(shift: Shift) {
   return 'Night'
 }
 
-// Normalizes a raw role string to a title-cased display label.
 function formatRoleLabel(raw: string) {
   const normalized = raw.toLowerCase().replace(/[-_]/g, ' ')
   if (normalized.includes('cook')) return 'Cook'
@@ -54,6 +59,53 @@ function shiftRoleColorClass(roleLabel: string) {
 function displayEmployeeName(employeeId: string, employeeNameById: Record<string, string>) {
   if (employeeId.toLowerCase() === 'owner_id') return 'Owner'
   return employeeNameById[employeeId] ?? employeeId
+}
+
+function localIsoDate(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const dayOfMonth = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${dayOfMonth}`
+}
+
+function parseTimeToMinutes(raw: string) {
+  const [hoursPart = '0', minutesPart = '0'] = raw.split(':')
+  const hours = Number(hoursPart)
+  const minutes = Number(minutesPart)
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 0
+  return hours * 60 + minutes
+}
+
+function buildDayCards(dayShifts: Shift[], assignmentsByShiftId: Map<string, string[]>, employeeNameById: Record<string, string>) {
+  const cards: ShiftCard[] = []
+
+  for (const shift of dayShifts) {
+    const assignedEmployeeIds = assignmentsByShiftId.get(shift.id) ?? []
+    const roleLabel = shiftRoleLabel(shift)
+
+    assignedEmployeeIds.forEach((employeeId, index) => {
+      cards.push({
+        id: `${shift.id}-assigned-${employeeId}-${index}`,
+        startTime: shift.start_time,
+        endTime: shift.end_time,
+        employeeLabel: displayEmployeeName(employeeId, employeeNameById),
+        roleLabel,
+      })
+    })
+
+    const openSlots = Math.max(shift.required_staff - assignedEmployeeIds.length, 0)
+    for (let slotIndex = 0; slotIndex < openSlots; slotIndex += 1) {
+      cards.push({
+        id: `${shift.id}-open-${slotIndex}`,
+        startTime: shift.start_time,
+        endTime: shift.end_time,
+        employeeLabel: 'Open shift',
+        roleLabel,
+      })
+    }
+  }
+
+  return cards.sort((a, b) => parseTimeToMinutes(a.startTime) - parseTimeToMinutes(b.startTime))
 }
 
 export function ScheduleGrid({
@@ -91,73 +143,84 @@ export function ScheduleGrid({
   const displayedShifts = onlyAssignedShifts
     ? shiftsForWeek.filter((shift) => (assignmentsByShiftId.get(shift.id) ?? []).length > 0)
     : shiftsForWeek
+  const distinctShiftDates = new Set(displayedShifts.map((shift) => shift.date))
+  const hasIncompleteTwoWeekData = distinctShiftDates.size > 0 && distinctShiftDates.size < 14
 
   const shiftsByDayIso = new Map(days.map((day) => [day.iso, [] as Shift[]]))
   for (const shift of displayedShifts) {
     shiftsByDayIso.get(shift.date)?.push(shift)
   }
   const weeks = [days.slice(0, 7), days.slice(7, 14)]
+  const todayIso = localIsoDate(new Date())
 
   return (
-    <Card className="border-primary/15">
-      <CardHeader className="border-b border-border/60 bg-gradient-hero">
-        <CardTitle className="text-lg">{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {displayedShifts.length === 0 ? (
-          <p className="px-6 py-8 text-sm text-muted-foreground">{emptyMessage}</p>
-        ) : (
-          <div className="space-y-6 p-4">
-            {weeks.map((weekDays, weekIndex) => (
-              <section className="space-y-0 rounded-xl border border-border/60" key={`week-${weekIndex}`}>
-                <div className="border-b border-border/60 bg-muted/30 px-4 py-2 text-sm font-semibold text-foreground">
-                  Week {weekIndex + 1}
+    <div className="space-y-4">
+      {hasIncompleteTwoWeekData ? (
+        <p className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning-foreground">
+          Warning: this run has shifts on {distinctShiftDates.size} of 14 days. Missing days show as Off.
+        </p>
+      ) : null}
+      {displayedShifts.length === 0 ? (
+        <div className="rounded-2xl border border-border/50 bg-card px-6 py-8 text-sm text-muted-foreground">{emptyMessage}</div>
+      ) : (
+        weeks.map((weekDays, weekIndex) => {
+          const weekDate = new Date(`${weekDays[0]?.iso ?? weekStart}T00:00:00`)
+          return (
+            <section className="overflow-hidden rounded-2xl border border-border/50 bg-card" key={`week-${weekIndex}`}>
+              <div className="border-b border-border/50 bg-gradient-hero p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-foreground">
+                    {title} {weeks.length > 1 ? `- Week ${weekIndex + 1}` : null}
+                  </h3>
+                  <span className="text-sm text-muted-foreground">
+                    Week of {weekDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  </span>
                 </div>
-                <div className="grid grid-cols-7 border-b border-border/60">
-                  {weekDays.map((day) => (
-                    <div className="border-r border-border/60 p-3 text-center last:border-r-0" key={`hdr-${day.key}`}>
-                      <p className="text-xs font-semibold text-muted-foreground">{day.dayLabel}</p>
-                      <p className="mt-1 text-base font-bold text-foreground">{new Date(`${day.iso}T00:00:00`).getDate()}</p>
+              </div>
+              <div className="grid grid-cols-7 border-b border-border/50">
+                {weekDays.map((day) => {
+                  const isToday = day.iso === todayIso
+                  return (
+                    <div
+                      className={cn('border-r border-border/50 p-3 text-center last:border-r-0', isToday && 'bg-primary/5')}
+                      key={`hdr-${day.key}`}
+                    >
+                      <p className={cn('text-xs font-medium', isToday ? 'text-primary' : 'text-muted-foreground')}>{day.dayLabel}</p>
+                      <p className={cn('mt-1 text-lg font-bold', isToday ? 'text-primary' : 'text-foreground')}>
+                        {new Date(`${day.iso}T00:00:00`).getDate()}
+                      </p>
                     </div>
-                  ))}
-                </div>
-                <div className="grid grid-cols-7">
-                  {weekDays.map((day) => {
-                    const dayShifts = shiftsByDayIso.get(day.iso) ?? []
-                    return (
-                      <div className="min-h-[260px] space-y-2 border-r border-border/60 p-2 last:border-r-0" key={`body-${day.key}`}>
-                        {dayShifts.length === 0 ? (
-                          <div className="grid h-full place-items-center rounded-lg border border-dashed border-border/80 text-xs text-muted-foreground/60">
-                            Off
+                  )
+                })}
+              </div>
+              <div className="grid min-h-[220px] grid-cols-7">
+                {weekDays.map((day) => {
+                  const dayShifts = shiftsByDayIso.get(day.iso) ?? []
+                  const dayCards = buildDayCards(dayShifts, assignmentsByShiftId, employeeNameById)
+                  return (
+                    <div className="space-y-2 border-r border-border/50 p-2 last:border-r-0" key={`body-${day.key}`}>
+                      {dayShifts.length === 0 ? (
+                        <div className="flex h-full min-h-[140px] items-center justify-center">
+                          <span className="text-xs text-muted-foreground/50">Off</span>
+                        </div>
+                      ) : (
+                        dayCards.map((card) => (
+                          <div className={cn('rounded-lg border p-2 text-xs', shiftRoleColorClass(card.roleLabel))} key={card.id}>
+                            <p className="font-medium">{card.employeeLabel}</p>
+                            <p className="mt-1 opacity-80">
+                              {formatEtTime(card.startTime)} - {formatEtTime(card.endTime)}
+                            </p>
                           </div>
-                        ) : (
-                          dayShifts.map((shift) => {
-                            const assignedEmployeeIds = assignmentsByShiftId.get(shift.id) ?? []
-                            const roleLabel = shiftRoleLabel(shift)
-                            return (
-                              <div className={cn('rounded-lg border p-2 text-xs', shiftRoleColorClass(roleLabel))} key={shift.id}>
-                                <p className="font-semibold">{roleLabel}</p>
-                                <p className="mt-0.5 opacity-85">
-                                  {shift.start_time} - {shift.end_time}
-                                </p>
-                                <p className="mt-1 opacity-85">
-                                  {assignedEmployeeIds.length === 0
-                                    ? `Unassigned (${shift.required_staff} needed)`
-                                    : assignedEmployeeIds.map((employeeId) => displayEmployeeName(employeeId, employeeNameById)).join(', ')}
-                                </p>
-                              </div>
-                            )
-                          })
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              </section>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+                        ))
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )
+        })
+      )}
+    </div>
   )
 }

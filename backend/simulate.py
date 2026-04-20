@@ -27,11 +27,6 @@ def _next_monday(d: date) -> date:
 
 
 def reset_db(session: Session) -> None:
-    """
-    Clears tables so a simulation run is reproducible.
-
-    Note: no migrations yet; best practice is to run simulation on a fresh DB file.
-    """
     session.exec(delete(TimeOffRequest))
     session.exec(delete(Availability))
     session.exec(delete(EmployeeJobRole))
@@ -49,7 +44,6 @@ def seed_roles_and_coverage(session: Session) -> None:
         if not session.get(JobRole, r):
             session.add(JobRole(name=r))
 
-    # Directed edges: from_role -> to_role
     edges = [
         ("barista", "cashier"),
         ("server_lead", "cashier"),
@@ -66,7 +60,6 @@ def seed_roles_and_coverage(session: Session) -> None:
 def seed_employees(session: Session, rng: random.Random, n_servers: int, n_cooks: int) -> None:
     employees: list[Employee] = []
 
-    # Ensure at least one manager/shift_lead in server category
     employees.append(
         Employee(
             id="mgr1",
@@ -124,7 +117,6 @@ def seed_employees(session: Session, rng: random.Random, n_servers: int, n_cooks
         session.add(e)
     session.commit()
 
-    # Assign job roles (skills)
     for e in employees:
         if e.category == "server":
             role_name = rng.choice(["cashier", "barista", "server_lead"])
@@ -133,7 +125,6 @@ def seed_employees(session: Session, rng: random.Random, n_servers: int, n_cooks
         session.add(EmployeeJobRole(employee_id=e.id, role_name=role_name))
     session.commit()
 
-    # Availability: most days 9-17, but randomly remove 1-2 weekdays
     for e in employees:
         unavailable_days = set(rng.sample([0, 1, 2, 3, 4], k=rng.choice([0, 1, 2])))
         for dow in range(7):
@@ -153,44 +144,39 @@ def seed_employees(session: Session, rng: random.Random, n_servers: int, n_cooks
 def seed_shifts_for_period(session: Session, period_start: date) -> None:
     period_end = period_start + timedelta(days=13)
     current = period_start
+    flex_templates = [(10, 18), (11, 19), (12, 20), (15, 21), (16, 20), (17, 23)]
+    day_index = 0
     while current <= period_end:
-        # Server coverage: 3 staff for cashier tasks
-        session.add(
-            Shift(
-                id=f"sv_{current.isoformat()}",
-                date=current,
-                start_time=time(9, 0),
-                end_time=time(17, 0),
-                required_staff=3,
-                required_category="server",
-                required_role="cashier",
+        flex_start, flex_end = flex_templates[day_index % len(flex_templates)]
+        templates = [
+            (f"sv_open_{current.isoformat()}", "server", "cashier", 2, time(9, 0), time(17, 0)),
+            (f"sv_close_{current.isoformat()}", "server", "cashier", 2, time(15, 0), time(23, 0)),
+            (f"sv_flex_{current.isoformat()}", "server", "cashier", 1, time(flex_start, 0), time(flex_end, 0)),
+            (f"ck_open_{current.isoformat()}", "cook", "prep_cook", 1, time(9, 0), time(17, 0)),
+            (f"ck_close_{current.isoformat()}", "cook", "prep_cook", 1, time(15, 0), time(23, 0)),
+            (f"ck_flex_{current.isoformat()}", "cook", "prep_cook", 1, time(flex_start, 0), time(flex_end, 0)),
+        ]
+        for shift_id, category, role, required_staff, start_time, end_time in templates:
+            session.add(
+                Shift(
+                    id=shift_id,
+                    date=current,
+                    start_time=start_time,
+                    end_time=end_time,
+                    required_staff=required_staff,
+                    required_category=category,
+                    required_role=role,
+                )
             )
-        )
-        # Cook coverage: 2 staff for prep
-        session.add(
-            Shift(
-                id=f"ck_{current.isoformat()}",
-                date=current,
-                start_time=time(9, 0),
-                end_time=time(17, 0),
-                required_staff=2,
-                required_category="cook",
-                required_role="prep_cook",
-            )
-        )
         current += timedelta(days=1)
+        day_index += 1
     session.commit()
 
 
 def seed_time_off_for_period(session: Session, rng: random.Random, period_start: date) -> None:
-    """
-    Create a few time-off requests and approve them using the same capacity rules.
-    This creates realistic conflicts without bypassing policy.
-    """
     employees = session.exec(select(Employee)).all()
     period_end = period_start + timedelta(days=13)
 
-    # 3-6 random requests in the period
     num_requests = rng.randint(3, 6)
     for _ in range(num_requests):
         e = rng.choice(employees)
@@ -198,7 +184,6 @@ def seed_time_off_for_period(session: Session, rng: random.Random, period_start:
         kind = rng.choice(["request_off", "pto"])
         hours = 8.0 if kind == "pto" else 0.0
 
-        # Create as pending first (submission rules are “2 weeks in advance”; simulation assumes these were filed earlier)
         row = TimeOffRequest(
             employee_id=e.id,
             date=request_date,
@@ -212,13 +197,11 @@ def seed_time_off_for_period(session: Session, rng: random.Random, period_start:
         session.commit()
         session.refresh(row)
 
-        # Try to approve under capacity rules; if it fails, leave as pending.
         try:
             approve_time_off(row.id, session)
         except Exception:
             pass
 
-    # ensure we don't create time off outside the period (keep DB clean)
     session.exec(
         delete(TimeOffRequest).where(
             (TimeOffRequest.date < period_start) | (TimeOffRequest.date > period_end)
@@ -244,7 +227,6 @@ def run_simulation(*, weeks: int, seed: int, reset: bool) -> None:
             seed_shifts_for_period(session, period_start)
             seed_time_off_for_period(session, rng, period_start)
 
-            # Generate baseline + optimized so analytics can compare.
             generate_and_persist_schedule(session=session, week_start_date=period_start, mode="baseline")
             generate_and_persist_schedule(session=session, week_start_date=period_start, mode="optimized")
 
