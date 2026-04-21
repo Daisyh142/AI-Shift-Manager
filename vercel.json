@@ -10,12 +10,15 @@
     },
     {
       "src": "api/index.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": ["backend/**", "requirements.txt"]
+      }
     }
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
+      "src": "/(auth|ai|analytics|employees|job-roles|metrics|pto|schedules|time-off|availability|coverage-requests|hours-requests|shifts|seed|docs|openapi.json|redoc)(.*)",
       "dest": "/api/index.py"
     },
     {

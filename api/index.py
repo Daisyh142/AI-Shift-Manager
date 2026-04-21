@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+import sys
+import os
 
-from backend.main import app as backend_app
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-app = FastAPI()
-app.mount("/api", backend_app)
+from backend.main import app
