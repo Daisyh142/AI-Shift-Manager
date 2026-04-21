@@ -1,10 +1,9 @@
-## WorkForYou – Milestone 1 (Deterministic Scheduler)
+## WorkForYou 
 
 This project is a **deterministic, auditable scheduling backend** built with **FastAPI + SQLite**.
 
 Gemini/LangChain are intentionally **not** part of Milestone 1’s core scheduling logic. The scheduler and validators are pure Python, driven by SQL data.
 
-### What’s included in Milestone 1
 
 - **2-week schedule generation** (`draft → review → redo → publish`)
 - **Employees** with:
